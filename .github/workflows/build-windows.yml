@@ -193,20 +193,29 @@ jobs:
           if (-not (Test-Path $log)) { Write-Output 'no test log was written'; exit 0 }
 
           $lines = @(Get-Content $log)
-          $start = -1
-          for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -like 'not ok *') { $start = $i; break }
-          }
-          Write-Output "test log: $($lines.Count) lines"
+          $failing = @($lines | Where-Object { $_ -like 'not ok *' })
+          Write-Output "test log: $($lines.Count) lines, $($failing.Count) failing test(s)"
 
-          if ($start -lt 0) {
+          if ($failing.Count -eq 0) {
             Write-Output '::error title=Desktop shell tests failed::the log has no failing test ("not ok") — the suite itself did not start'
             exit 0
           }
 
+          # One annotation per failing test, so a run with several failures names
+          # them all instead of only the first.
+          foreach ($line in ($failing | Select-Object -First 10)) {
+            Write-Output "::error title=Desktop shell test failed::$($line -replace '%', '%25')"
+          }
+
+          # ...and the first one's diagnostic block, which is where the assertion
+          # says what it actually got.
+          $start = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -like 'not ok *') { $start = $i; break }
+          }
           $end = [Math]::Min($start + 20, $lines.Count - 1)
           $excerpt = ($lines[$start..$end] -join "`n") -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
-          Write-Output "::error title=Desktop shell test failed::$excerpt"
+          Write-Output "::error title=First desktop test failure (detail)::$excerpt"
 
       # Refuse to publish a version that is already published, or older than the
       # published one, or parked on someone else's release. Read-only: it reads the
