@@ -1,0 +1,216 @@
+# Builds and publishes the Windows installer the tills update from.
+#
+# WHERE THIS FILE RUNS
+#   In the RELEASES repository (github.com/aalmaavventures/aalmaavbill-releases),
+#   not next to the application source. The source of truth is GitLab
+#   (gitlab.com/almaavventures/aalmaavbill); this job clones it, builds the
+#   installer and publishes the result as a release of THIS repository. Installed
+#   tills poll this repository anonymously, so it must stay public.
+#
+#   Because the job runs here, `github.repository_owner` and
+#   `github.event.repository.name` below resolve to aalmaavventures /
+#   aalmaavbill-releases, so the update link baked into the installer is the right
+#   one without any repository name being hardcoded in this file.
+#
+#   The workflow is versioned with the application (inside aalmaav-bill-windows/)
+#   and copied into the releases repository with:
+#       cd aalmaav-bill-windows && npm run workflow:install -- --target=github-releases
+#   Check the two copies for drift with:  npm run workflow:install -- --check
+#
+# PUBLISHING
+#   Publishing is opt-in: a tag push publishes a release, a manual run publishes
+#   only when the `publish` box is ticked. Any other build is an ordinary
+#   installer with automatic updates deliberately left off.
+#
+#   The upload token is this job's own `secrets.GITHUB_TOKEN` (permission
+#   `contents: write` below). scripts/release-win.js passes it to electron-builder
+#   as GH_TOKEN/GITHUB_TOKEN; it is never written to a file the installer ships,
+#   and `npm run verify` fails the build if a token ever appears in the baked
+#   update configuration.
+#
+# CLONING THE SOURCE
+#   Anonymous by default, which is why the GitLab project must stay public. If it
+#   is ever made private, add GITLAB_DEPLOY_USER and GITLAB_DEPLOY_TOKEN (a
+#   Project Deploy Token with only the read_repository scope) to THIS repository's
+#   Actions secrets — the clone step below then authenticates without any other
+#   change. Never put a credential in this file.
+
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish a GitHub Release (requires the GITHUB_TOKEN permission below)'
+        type: boolean
+        default: false
+      source:
+        description: 'GitLab branch or tag to build'
+        type: string
+        default: main
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  # The application source and where it is cloned inside the runner.
+  GITLAB_REPO: https://gitlab.com/almaavventures/aalmaavbill.git
+  SRC_DIR: src
+  # A tag push publishes a release; a manual run publishes only when asked.
+  PUBLISH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+  # Which ref to build: the manual input, or the tag that was just pushed.
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source || github.ref_name }}
+  # The update link, in the same names a developer uses locally (.env or shell).
+  # It is baked into the installer by `npm run stage`, so the built app checks
+  # this repository's releases. The token is a CI secret and is never written
+  # to any file the installer ships.
+  AALMAAV_UPDATE_OWNER: ${{ github.repository_owner }}
+  AALMAAV_UPDATE_REPO: ${{ github.event.repository.name }}
+  AALMAAV_UPDATE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out this repository (the workflow, not the application)
+        uses: actions/checkout@v4
+
+      - name: Clone the application source
+        shell: pwsh
+        env:
+          # Empty unless a Project Deploy Token has been added to this
+          # repository's secrets; without them the clone is anonymous.
+          GITLAB_DEPLOY_USER: ${{ secrets.GITLAB_DEPLOY_USER }}
+          GITLAB_DEPLOY_TOKEN: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+        run: |
+          $gitArgs = @('-c', 'core.autocrlf=false', '-c', 'advice.detachedHead=false')
+          if ($env:GITLAB_DEPLOY_USER -and $env:GITLAB_DEPLOY_TOKEN) {
+            # Basic auth for git over HTTPS. The header is passed per invocation
+            # and never stored in .git/config; the token only needs the
+            # read_repository scope. No credential is written to any file.
+            $pair = "$($env:GITLAB_DEPLOY_USER):$($env:GITLAB_DEPLOY_TOKEN)"
+            $header = 'Authorization: Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pair))
+            $gitArgs += @('-c', "http.extraheader=$header")
+            Write-Host 'cloning with a GitLab deploy token'
+          } else {
+            Write-Host 'cloning anonymously (the source repository is public)'
+          }
+
+          function Get-Source([string]$ref) {
+            Remove-Item -Recurse -Force $env:SRC_DIR -ErrorAction SilentlyContinue
+            Write-Host "cloning $env:GITLAB_REPO at '$ref'"
+            & git @gitArgs clone --depth 1 --branch $ref $env:GITLAB_REPO $env:SRC_DIR
+          }
+
+          Get-Source $env:SOURCE_REF
+          if ($LASTEXITCODE -ne 0) {
+            if ($env:SOURCE_REF -eq 'main') { throw "cloning $env:GITLAB_REPO at '$env:SOURCE_REF' failed" }
+            Write-Host "'$env:SOURCE_REF' is not in the source repository; falling back to main"
+            Get-Source 'main'
+            if ($LASTEXITCODE -ne 0) { throw "cloning $env:GITLAB_REPO failed" }
+          }
+
+          # Record exactly what was built, so a release can be tied back to a commit.
+          $pkg = Get-Content "$env:SRC_DIR/aalmaav-bill-windows/package.json" -Raw | ConvertFrom-Json
+          $sha = (& git -C $env:SRC_DIR rev-parse HEAD).Trim()
+          "SOURCE_VERSION=$($pkg.version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SOURCE_SHA=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "source '$env:SOURCE_REF' at $sha, version $($pkg.version)"
+
+          # A tag must claim the version it actually contains. This is what stops
+          # a release being cut at a version the source never had.
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $expected = "v$($pkg.version)"
+            if ($env:GITHUB_REF_NAME -ne $expected) {
+              throw "tag $env:GITHUB_REF_NAME does not match package.json version $($pkg.version) (expected $expected)"
+            }
+          }
+
+      # The bundled Node.js runtime and the staged native modules (better-sqlite3,
+      # sharp, the Prisma schema engine) must be built for the same Node ABI.
+      - name: Use Node.js 22 (matches the bundled runtime in scripts/fetch-node-runtime.js)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            aalmaav-bill-windows/package-lock.json
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: ${{ env.SRC_DIR }}/backend
+        run: npm ci
+
+      - name: Install frontend dependencies
+        working-directory: ${{ env.SRC_DIR }}/frontend
+        run: npm ci
+
+      - name: Install desktop packaging dependencies
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm ci
+
+      - name: Unit tests for the desktop shell
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm test
+
+      # Refuse to publish a version that is already published, or older than the
+      # published one, or parked on someone else's release. Read-only: it reads the
+      # public GitHub API anonymously, exactly as an installed till does.
+      - name: Pre-flight checks on the release feed
+        if: ${{ env.PUBLISH == 'true' }}
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm run verify:feed -- --phase=pre --version ${{ env.SOURCE_VERSION }}
+
+      - name: Stage the runtime (backend, built frontend, bundled Node.js, licences)
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm run stage -- --target win32 --arch x64
+
+      - name: Verify the staged tree and the installer configuration
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm run verify -- --strict --target win32
+
+      - name: Build the NSIS installer (and publish when this is a release)
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        shell: pwsh
+        run: |
+          if ($env:PUBLISH -eq 'true') {
+            # The same script a developer runs; the update link comes from the
+            # AALMAAV_UPDATE_* environment defined for this job. It hands the token
+            # to electron-builder as GH_TOKEN — the step that actually uploads.
+            npm run release:win -- --skip-stage
+          } else {
+            npx electron-builder --win nsis --x64 --publish never
+          }
+
+      - name: Verify the installer exists
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        shell: pwsh
+        run: |
+          $found = @(Get-ChildItem 'dist/AalmaavBill-Setup-*.exe' -ErrorAction SilentlyContinue)
+          if ($found.Count -ne 1) { throw "expected one dist/AalmaavBill-Setup-<version>.exe, found $($found.Count)" }
+          $found | Select-Object Name, Length, LastWriteTime
+          Get-FileHash $found[0].FullName -Algorithm SHA256
+
+      # Read the published feed back the way a till does: anonymously, with no
+      # token, and compare it against the files just built. A version that is not
+      # reachable here would be stranded.
+      - name: Verify the published release feed (anonymous)
+        if: ${{ env.PUBLISH == 'true' }}
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm run verify:feed -- --phase=post --version ${{ env.SOURCE_VERSION }}
+
+      - name: Upload the installer as a workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AalmaavBill-Setup-${{ env.SOURCE_VERSION }}
+          path: |
+            src/aalmaav-bill-windows/dist/AalmaavBill-Setup-*.exe
+            src/aalmaav-bill-windows/dist/latest.yml
+            src/aalmaav-bill-windows/dist/*.blockmap
+          if-no-files-found: error
