@@ -137,10 +137,15 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+          # These are resolved against the repository root, NOT against a step's
+          # `working-directory`, and the application source is cloned into
+          # SRC_DIR — so every entry starts with `src/`. Without it setup-node
+          # cannot resolve any of the three lockfiles and fails the job before a
+          # single dependency is installed.
           cache-dependency-path: |
-            aalmaav-bill-windows/package-lock.json
-            backend/package-lock.json
-            frontend/package-lock.json
+            src/aalmaav-bill-windows/package-lock.json
+            src/backend/package-lock.json
+            src/frontend/package-lock.json
 
       - name: Install backend dependencies
         working-directory: ${{ env.SRC_DIR }}/backend
