@@ -160,8 +160,25 @@ jobs:
         run: npm ci
 
       - name: Unit tests for the desktop shell
+        id: desktop-tests
         working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
-        run: npm test
+        shell: pwsh
+        run: |
+          # This suite runs on Windows for the first time here. A failing test must
+          # be readable by whoever is looking at the run, and the job log of a
+          # public repository requires an account — so the output is kept as an
+          # artifact (artifacts download anonymously) and re-thrown as the step's
+          # own exit code.
+          npm test 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\desktop-tests.log"
+          exit $LASTEXITCODE
+
+      - name: Upload the desktop test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-test-log
+          path: ${{ runner.temp }}/desktop-tests.log
+          if-no-files-found: warn
 
       # Refuse to publish a version that is already published, or older than the
       # published one, or parked on someone else's release. Read-only: it reads the
