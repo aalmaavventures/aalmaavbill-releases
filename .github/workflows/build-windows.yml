@@ -233,6 +233,21 @@ jobs:
         working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
         run: npm run verify -- --strict --target win32
 
+      # The release is created HERE, as a draft, before anything is built. Two
+      # reasons, and the first real publish produced both:
+      #   * electron-builder creates the release once per publisher instance, and two
+      #     of them racing produced TWO releases for v1.2.0 — the installer and
+      #     latest.yml on one record, the blockmap on the other, which is exactly what
+      #     the post-publish guard then failed on. With the release already in place,
+      #     every upload attaches to it instead of creating its own.
+      #   * a draft is invisible to anonymous readers and every till is anonymous, so
+      #     a half-uploaded release cannot be seen — or downloaded — by a shop.
+      # This makes nothing visible: the promote step below is what does that.
+      - name: Prepare the release (a draft no till can see)
+        if: ${{ env.PUBLISH == 'true' }}
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm run release:prepare -- --version ${{ env.SOURCE_VERSION }} --source "GitLab ${{ env.SOURCE_SHA }}"
+
       - name: Build the NSIS installer (and publish when this is a release)
         working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
         shell: pwsh
@@ -255,6 +270,15 @@ jobs:
           $found | Select-Object Name, Length, LastWriteTime
           Get-FileHash $found[0].FullName -Algorithm SHA256
 
+      # The one moment the feed changes: the draft becomes a release, and only now
+      # that the installer, its blockmap and latest.yml are all attached and the
+      # installer has been checked. Until this step runs, a till sees the previous
+      # version and nothing else — which is what makes a failed build harmless.
+      - name: Publish the release (the feed changes here)
+        if: ${{ env.PUBLISH == 'true' }}
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm run release:promote -- --version ${{ env.SOURCE_VERSION }}
+
       # Read the published feed back the way a till does: anonymously, with no
       # token, and compare it against the files just built. A version that is not
       # reachable here would be stranded.
@@ -262,6 +286,15 @@ jobs:
         if: ${{ env.PUBLISH == 'true' }}
         working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
         run: npm run verify:feed -- --phase=post --version ${{ env.SOURCE_VERSION }}
+
+      # A failed run leaves the draft behind. The next attempt for this version
+      # clears it (prepare does exactly that), but a person reading the releases page
+      # should see either a published version or nothing at all. A published release
+      # is never touched here: a till may already have it.
+      - name: Discard the draft a failed run left behind
+        if: failure() && env.PUBLISH == 'true'
+        working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        run: npm run release:discard -- --version ${{ env.SOURCE_VERSION }}
 
       - name: Upload the installer as a workflow artifact
         if: always()
