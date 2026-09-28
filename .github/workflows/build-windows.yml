@@ -180,6 +180,34 @@ jobs:
           path: ${{ runner.temp }}/desktop-tests.log
           if-no-files-found: warn
 
+      # The job log of a public repository needs an account to read, and so does an
+      # uploaded artifact — both need read access to the repository, not just the
+      # public feed. A check annotation does not, so the first failure is re-emitted
+      # as one: whoever is looking at the run sees which test broke, and why, with
+      # no credentials at all.
+      - name: Report the first desktop test failure
+        if: failure() && steps.desktop-tests.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\desktop-tests.log"
+          if (-not (Test-Path $log)) { Write-Output 'no test log was written'; exit 0 }
+
+          $lines = @(Get-Content $log)
+          $start = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -like 'not ok *') { $start = $i; break }
+          }
+          Write-Output "test log: $($lines.Count) lines"
+
+          if ($start -lt 0) {
+            Write-Output '::error title=Desktop shell tests failed::the log has no failing test ("not ok") — the suite itself did not start'
+            exit 0
+          }
+
+          $end = [Math]::Min($start + 20, $lines.Count - 1)
+          $excerpt = ($lines[$start..$end] -join "`n") -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          Write-Output "::error title=Desktop shell test failed::$excerpt"
+
       # Refuse to publish a version that is already published, or older than the
       # published one, or parked on someone else's release. Read-only: it reads the
       # public GitHub API anonymously, exactly as an installed till does.
