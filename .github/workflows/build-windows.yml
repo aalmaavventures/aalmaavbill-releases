@@ -115,6 +115,9 @@ jobs:
           }
 
           # Record exactly what was built, so a release can be tied back to a commit.
+          # SOURCE_SHA is also what the stage step bakes into the installer (see
+          # AALMAAV_SOURCE_REVISION below), so the release page, the installer's About
+          # window and this log line all name the same revision.
           $pkg = Get-Content "$env:SRC_DIR/aalmaav-bill-windows/package.json" -Raw | ConvertFrom-Json
           $sha = (& git -C $env:SRC_DIR rev-parse HEAD).Trim()
           "SOURCE_VERSION=$($pkg.version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -227,6 +230,13 @@ jobs:
 
       - name: Stage the runtime (backend, built frontend, bundled Node.js, licences)
         working-directory: ${{ env.SRC_DIR }}/aalmaav-bill-windows
+        env:
+          # Baked into the installer's update configuration so About (and the
+          # desktop settings window) can name the revision this till is running —
+          # the same revision the release page records. `npm run stage` also finds
+          # it from the checkout, but naming it here is what ties the two
+          # together on purpose rather than by accident.
+          AALMAAV_SOURCE_REVISION: ${{ env.SOURCE_SHA }}
         run: npm run stage -- --target win32 --arch x64
 
       - name: Verify the staged tree and the installer configuration
